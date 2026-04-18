@@ -1,0 +1,2 @@
+# syca
+startyourcontentacademy.com
