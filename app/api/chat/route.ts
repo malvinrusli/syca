@@ -111,10 +111,30 @@ export async function POST(req: NextRequest) {
     { role: "user" as const, content: thisUserContent },
   ];
 
-  const systemBlocks = [{ type: "text" as const, text: BASE_SYSTEM }];
-  if (project?.system_prompt) {
-    systemBlocks.push({ type: "text" as const, text: `Project: ${project.name}\n\n${project.system_prompt}` });
+  // Mark the last content block of the first user message (which holds the reference
+  // + project document blocks on turn 0) with cache_control so subsequent turns hit
+  // the cache for those large documents.
+  if (apiMessages[0]?.role === "user" && apiMessages[0].content.length > 0) {
+    const firstContent = [...apiMessages[0].content];
+    const lastIdx = firstContent.length - 1;
+    firstContent[lastIdx] = {
+      ...firstContent[lastIdx],
+      cache_control: { type: "ephemeral" },
+    } as MessageContentBlock;
+    apiMessages[0] = { ...apiMessages[0], content: firstContent };
   }
+
+  // Cache the system prompt prefix too.
+  const systemBlocks: Array<{ type: "text"; text: string; cache_control?: { type: "ephemeral" } }> = [
+    { type: "text", text: BASE_SYSTEM },
+  ];
+  if (project?.system_prompt) {
+    systemBlocks.push({ type: "text", text: `Project: ${project.name}\n\n${project.system_prompt}` });
+  }
+  systemBlocks[systemBlocks.length - 1] = {
+    ...systemBlocks[systemBlocks.length - 1],
+    cache_control: { type: "ephemeral" },
+  };
 
   const anthropic = getAnthropicClient();
 

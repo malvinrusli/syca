@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { ArrowUp } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { ChatMessage } from "@/components/chat/chat-message";
+import { ChatMessage, type UsageInfo } from "@/components/chat/chat-message";
 import { ModelPicker } from "@/components/chat/model-picker";
 import { renameConversation, setConversationModel } from "@/app/(app)/actions";
 import type { Conversation, DbMessage, MessageContentBlock, Project } from "@/lib/db-types";
@@ -16,6 +16,7 @@ type UiMessage = {
   role: "user" | "assistant";
   text: string;
   streaming?: boolean;
+  usage?: UsageInfo;
 };
 
 function toUi(msg: DbMessage): UiMessage {
@@ -23,7 +24,16 @@ function toUi(msg: DbMessage): UiMessage {
     .filter((b): b is Extract<MessageContentBlock, { type: "text" }> => b.type === "text")
     .map((b) => b.text)
     .join("");
-  return { id: msg.id, role: msg.role === "assistant" ? "assistant" : "user", text };
+  const usage: UsageInfo | undefined =
+    msg.role === "assistant"
+      ? {
+          input: msg.input_tokens,
+          output: msg.output_tokens,
+          cacheCreation: msg.cache_creation_tokens,
+          cacheRead: msg.cache_read_tokens,
+        }
+      : undefined;
+  return { id: msg.id, role: msg.role === "assistant" ? "assistant" : "user", text, usage };
 }
 
 export function ChatView({
@@ -153,7 +163,13 @@ export function ChatView({
           ) : (
             <div className="space-y-6">
               {messages.map((m) => (
-                <ChatMessage key={m.id} role={m.role} text={m.text} streaming={m.streaming} />
+                <ChatMessage
+                  key={m.id}
+                  role={m.role}
+                  text={m.text}
+                  streaming={m.streaming}
+                  usage={m.usage}
+                />
               ))}
             </div>
           )}

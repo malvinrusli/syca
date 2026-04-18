@@ -35,10 +35,12 @@ export type Conversation = {
   created_at: string;
 };
 
+export type CacheControl = { type: "ephemeral" };
+
 export type MessageContentBlock =
-  | { type: "text"; text: string }
-  | { type: "document"; source: { type: "file"; file_id: string } }
-  | { type: "image"; source: { type: "file"; file_id: string } };
+  | { type: "text"; text: string; cache_control?: CacheControl }
+  | { type: "document"; source: { type: "file"; file_id: string }; cache_control?: CacheControl }
+  | { type: "image"; source: { type: "file"; file_id: string }; cache_control?: CacheControl };
 
 export type DbMessage = {
   id: string;
