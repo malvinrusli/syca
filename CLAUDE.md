@@ -55,7 +55,7 @@ Default: Sonnet 4.6. Admin can change the global default from the settings panel
 3. **Projects (shared org-wide)** — All members see all projects. Any member can create a project. Each project has its own reference files and optional system prompt. Conversations live under a project and stay private to each user.
 4. **Project files** — Members upload files into a project. Supported: **PDF, txt, md, csv, docx, png, jpg, webp**. `.docx` is converted to text server-side before upload to Claude; other types pass through to the Files API directly. Files are stored in Supabase Storage AND uploaded to Anthropic Files API; `file_id` is attached to every message in that project.
 5. **Admin panel** (`/admin`, admin role only)
-   - **Skills** — admin **uploads a `.md` file** with YAML frontmatter (`name`, `description`) and markdown body (instructions). Every chat automatically injects enabled skills into the system prompt.
+   - **Skills** — admin **uploads a `.md` file** with YAML frontmatter (`name`, `description`) and markdown body. The file is forwarded to the **Anthropic Skills API**; Anthropic hosts the body and returns a `skill_id`. Every chat request attaches enabled `skill_id`s in `container.skills`. **Claude auto-picks** which skill(s) to activate per user message based on their descriptions.
    - **Reference folder** — global files available inside every project, merged with project files.
    - **Default model** and per-user usage overview.
 6. **Model picker** — per-conversation, with the admin's default.
@@ -118,13 +118,14 @@ create table messages (
   created_at timestamptz default now()
 );
 
--- admin-managed skills, uploaded as .md files with frontmatter
+-- admin-managed skills; body is hosted by Anthropic Skills API
 create table skills (
   id uuid primary key default gen_random_uuid(),
   name text not null unique,             -- from frontmatter
-  description text not null,             -- from frontmatter, for when-to-use routing
-  instructions text not null,            -- markdown body, extracted from upload
-  storage_path text not null,            -- original .md file in supabase storage
+  description text not null,             -- from frontmatter, shown to Claude for routing
+  anthropic_skill_id text not null,      -- returned by Skills API on upload
+  version text not null default 'latest',
+  storage_path text not null,            -- raw .md backup in supabase storage
   enabled boolean not null default true,
   created_at timestamptz default now(),
   updated_at timestamptz default now()
@@ -199,15 +200,19 @@ syca/
 ## Chat Request Flow
 
 1. Client POSTs `{ conversationId, userMessage }` to `/api/chat`.
-2. Server loads: conversation (for model + project), project files, enabled skills, enabled reference files, prior messages.
-3. Build `system` array with `cache_control: { type: "ephemeral" }` markers:
-   - base SYCA instructions (cache)
-   - skills block, concatenated from all enabled skills (cache)
-   - reference files as `document` blocks with `file_id` (cache)
-   - project files as `document` blocks with `file_id` (cache)
-   - project `system_prompt` if set (cache)
-4. `anthropic.messages.stream({...})` → SSE to client.
+2. Server loads: conversation (for model + project), project files, enabled skill IDs, enabled reference files, prior messages.
+3. Build request with beta headers `skills-2025-10-02` + `code-execution-2025-08-25`:
+   - `system` array (all with `cache_control: { type: "ephemeral" }`):
+     - base SYCA instructions
+     - reference files as `document` blocks with `file_id`
+     - project files as `document` blocks with `file_id`
+     - project `system_prompt` if set
+   - `container.skills`: array of `{ type: "custom", skill_id, version: "latest" }` for every enabled skill (cap 8 per request; if >8, admin picks priority).
+   - `tools`: `[{ type: "code_execution_20250825", name: "code_execution" }]` — required by Skills API but only spins up the container if a skill calls for code.
+4. `anthropic.beta.messages.stream({...})` → SSE to client. Claude chooses per-turn which of the attached skills to activate based on their descriptions.
 5. On stream end: persist assistant message + token counts (including `cache_creation_input_tokens` / `cache_read_input_tokens`).
+
+**Fallback if native Skills become a blocker:** swap `container.skills` for system-prompt concatenation (old Path B). Schema already stores `storage_path` so we retain the raw `.md`.
 
 ---
 
@@ -218,13 +223,18 @@ Admins upload a `.md` file. Example:
 ```markdown
 ---
 name: hook-writer
-description: Writes scroll-stopping short-form video hooks in SYCA's voice.
+description: Writes scroll-stopping short-form video hooks in SYCA's voice. Use when the user asks for hooks, openers, or the first 3 seconds of a video.
 ---
 
 You are SYCA's hook specialist. Write 5 variations...
 ```
 
-Server parses frontmatter for `name` + `description`, keeps the body as `instructions`, stores the raw `.md` in Supabase Storage, and inserts a row in `skills`.
+Server flow on upload:
+1. Store raw `.md` in Supabase Storage (backup / re-upload source).
+2. POST the file to Anthropic's **Skills API** (`/v1/skills`, beta header `skills-2025-10-02`).
+3. Persist `{ name, description, anthropic_skill_id, version, storage_path }` in the `skills` table.
+
+**Important:** the `description` is what Claude uses to decide whether to activate the skill for a given user message. Write it as "use when…" so the router has clear signals.
 
 ---
 
@@ -248,7 +258,7 @@ Supabase project will be created later; `.env.local` stays empty until then.
 - **M2** — Shared projects + conversations CRUD, basic chat (no files, default model).
 - **M3** — Model picker + streaming + markdown rendering + message persistence.
 - **M4** — Project file upload: Supabase Storage → Anthropic Files API, wired into `/api/chat`. Support PDF / txt / md / csv / images natively; convert `.docx` server-side.
-- **M5** — Admin panel: `.md` skill uploads, reference folder uploads, default model, invite-by-email.
+- **M5** — Admin panel: `.md` skill uploads (forwarded to Anthropic Skills API → store `skill_id`), reference folder uploads, default model, invite-by-email. Wire `container.skills` + `code_execution` tool into `/api/chat` so Claude auto-picks skills per message.
 - **M6** — Prompt caching, token usage display, SYCA branding polish.
 
 Stretch (out of scope for v1): per-user rate limits, monthly token caps, Stripe billing, Google OAuth, regenerate/edit message history.
