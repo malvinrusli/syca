@@ -1,13 +1,13 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { MessageSquare, Plus } from "lucide-react";
+import { Card, CardContent } from "@/components/ui/card";
+import { MessageSquare } from "lucide-react";
 import { StartChatButton } from "./start-chat-button";
 import { ProjectSettings } from "./project-settings";
+import { FileUploader } from "@/components/app/file-uploader";
+import { FileList } from "@/components/app/file-list";
 import type { Conversation, Project, ProjectFile } from "@/lib/db-types";
-import { formatBytes } from "@/lib/utils";
 
 export default async function ProjectDetailPage({
   params,
@@ -54,25 +54,20 @@ export default async function ProjectDetailPage({
 
       <div className="grid flex-1 gap-6 px-8 py-6 lg:grid-cols-2">
         <section>
-          <h2 className="mb-3 text-sm font-semibold text-muted-foreground">Reference files ({files.length})</h2>
+          <div className="mb-3 flex items-center justify-between">
+            <h2 className="text-sm font-semibold text-muted-foreground">
+              Reference files ({files.length})
+            </h2>
+            <FileUploader projectId={project.id} />
+          </div>
           <Card>
-            <CardContent className="p-4">
-              {files.length === 0 ? (
-                <p className="text-sm text-muted-foreground">No files yet. File upload ships in M4.</p>
-              ) : (
-                <ul className="space-y-1 text-sm">
-                  {files.map((f) => (
-                    <li key={f.id} className="flex items-center justify-between">
-                      <span className="truncate">{f.filename}</span>
-                      <span className="ml-2 text-xs text-muted-foreground">
-                        {f.size_bytes ? formatBytes(f.size_bytes) : ""}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-              )}
+            <CardContent className="p-2">
+              <FileList files={files} deleteEndpoint={(id) => `/api/files/${id}`} />
             </CardContent>
           </Card>
+          <p className="mt-2 text-xs text-muted-foreground">
+            Supported: PDF, txt, md, csv, docx, png, jpg, webp. Up to 30 MB each.
+          </p>
         </section>
 
         <section>

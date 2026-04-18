@@ -1,7 +1,8 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
-import { getAnthropicClient } from "@/lib/anthropic";
+import { getAnthropicClient, ANTHROPIC_BETAS } from "@/lib/anthropic";
 import { DEFAULT_MODEL, isValidModel } from "@/lib/models";
+import { isImageMime } from "@/lib/files";
 import type { DbMessage, MessageContentBlock } from "@/lib/db-types";
 
 export const runtime = "nodejs";
@@ -10,6 +11,19 @@ export const maxDuration = 300;
 const BASE_SYSTEM = `You are SYCA AI, a helpful personal branding and content strategy assistant for members of Start Your Content Academy. Be concise, practical, and stay on-brand for short-form content creators. Use markdown for structure.`;
 
 type ChatBody = { conversationId: string; message: string };
+
+type FileRef = { anthropic_file_id: string | null; mime_type: string | null };
+
+function filesToBlocks(files: FileRef[]): MessageContentBlock[] {
+  return files
+    .filter((f): f is FileRef & { anthropic_file_id: string } => Boolean(f.anthropic_file_id))
+    .map((f) => {
+      if (isImageMime(f.mime_type)) {
+        return { type: "image", source: { type: "file", file_id: f.anthropic_file_id } } as const;
+      }
+      return { type: "document", source: { type: "file", file_id: f.anthropic_file_id } } as const;
+    });
+}
 
 export async function POST(req: NextRequest) {
   let body: ChatBody;
@@ -37,7 +51,12 @@ export async function POST(req: NextRequest) {
 
   const model = isValidModel(conv.model) ? conv.model : DEFAULT_MODEL;
 
-  const [{ data: priorMessages }, { data: project }] = await Promise.all([
+  const [
+    { data: priorMessages },
+    { data: project },
+    { data: projectFiles },
+    { data: referenceFiles },
+  ] = await Promise.all([
     supabase
       .from("messages")
       .select("*")
@@ -46,22 +65,36 @@ export async function POST(req: NextRequest) {
     conv.project_id
       ? supabase.from("projects").select("system_prompt, name").eq("id", conv.project_id).maybeSingle()
       : Promise.resolve({ data: null as { system_prompt: string | null; name: string } | null }),
+    conv.project_id
+      ? supabase
+          .from("project_files")
+          .select("anthropic_file_id, mime_type")
+          .eq("project_id", conv.project_id)
+      : Promise.resolve({ data: [] as FileRef[] }),
+    supabase
+      .from("reference_files")
+      .select("anthropic_file_id, mime_type")
+      .eq("enabled", true),
   ]);
 
   const history = (priorMessages ?? []) as DbMessage[];
+  const isFirstExchange = history.length === 0;
 
-  const userBlock: MessageContentBlock = { type: "text", text: body.message };
-  const { data: insertedUser, error: userInsertErr } = await supabase
+  const userText: MessageContentBlock = { type: "text", text: body.message };
+  const contextBlocks: MessageContentBlock[] = isFirstExchange
+    ? [...filesToBlocks((referenceFiles ?? []) as FileRef[]), ...filesToBlocks((projectFiles ?? []) as FileRef[])]
+    : [];
+  const thisUserContent: MessageContentBlock[] = [...contextBlocks, userText];
+
+  const { error: userInsertErr } = await supabase
     .from("messages")
     .insert({
       conversation_id: conv.id,
       role: "user",
-      content: [userBlock],
-    })
-    .select()
-    .single();
-  if (userInsertErr || !insertedUser) {
-    return NextResponse.json({ error: userInsertErr?.message ?? "insert failed" }, { status: 500 });
+      content: thisUserContent,
+    });
+  if (userInsertErr) {
+    return NextResponse.json({ error: userInsertErr.message }, { status: 500 });
   }
 
   const apiMessages = [
@@ -69,7 +102,7 @@ export async function POST(req: NextRequest) {
       role: m.role === "assistant" ? ("assistant" as const) : ("user" as const),
       content: m.content as MessageContentBlock[],
     })),
-    { role: "user" as const, content: [userBlock] as MessageContentBlock[] },
+    { role: "user" as const, content: thisUserContent },
   ];
 
   const systemBlocks = [{ type: "text" as const, text: BASE_SYSTEM }];
@@ -78,7 +111,6 @@ export async function POST(req: NextRequest) {
   }
 
   const anthropic = getAnthropicClient();
-  const isFirstExchange = history.length === 0;
 
   const encoder = new TextEncoder();
   const stream = new ReadableStream<Uint8Array>({
@@ -87,15 +119,14 @@ export async function POST(req: NextRequest) {
         controller.enqueue(encoder.encode(`data: ${JSON.stringify(obj)}\n\n`));
 
       let full = "";
-      let inputTokens = 0;
-      let outputTokens = 0;
 
       try {
-        const claudeStream = anthropic.messages.stream({
+        const claudeStream = anthropic.beta.messages.stream({
           model,
           max_tokens: 4096,
           system: systemBlocks,
-          messages: apiMessages as Parameters<typeof anthropic.messages.stream>[0]["messages"],
+          messages: apiMessages as unknown as Parameters<typeof anthropic.beta.messages.stream>[0]["messages"],
+          betas: ANTHROPIC_BETAS,
         });
 
         for await (const event of claudeStream) {
@@ -106,15 +137,16 @@ export async function POST(req: NextRequest) {
         }
 
         const finalMsg = await claudeStream.finalMessage();
-        inputTokens = finalMsg.usage.input_tokens ?? 0;
-        outputTokens = finalMsg.usage.output_tokens ?? 0;
+        const usage = finalMsg.usage;
 
         await supabase.from("messages").insert({
           conversation_id: conv.id,
           role: "assistant",
           content: [{ type: "text", text: full }],
-          input_tokens: inputTokens,
-          output_tokens: outputTokens,
+          input_tokens: usage.input_tokens ?? 0,
+          output_tokens: usage.output_tokens ?? 0,
+          cache_creation_tokens: usage.cache_creation_input_tokens ?? null,
+          cache_read_tokens: usage.cache_read_input_tokens ?? null,
         });
 
         let title: string | null = null;
