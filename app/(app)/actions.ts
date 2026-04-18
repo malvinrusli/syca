@@ -61,7 +61,19 @@ export async function deleteProject(projectId: string) {
 
 export async function createConversation(projectId: string | null, model?: string) {
   const { supabase, user } = await getUser();
-  const selected = model && isValidModel(model) ? model : DEFAULT_MODEL;
+
+  let selected: string;
+  if (model && isValidModel(model)) {
+    selected = model;
+  } else {
+    const { data: setting } = await supabase
+      .from("app_settings")
+      .select("value")
+      .eq("key", "default_model")
+      .maybeSingle();
+    const configured = typeof setting?.value === "string" && isValidModel(setting.value) ? setting.value : null;
+    selected = configured ?? DEFAULT_MODEL;
+  }
 
   const { data, error } = await supabase
     .from("conversations")

@@ -56,6 +56,7 @@ export async function POST(req: NextRequest) {
     { data: project },
     { data: projectFiles },
     { data: referenceFiles },
+    { data: enabledSkills },
   ] = await Promise.all([
     supabase
       .from("messages")
@@ -75,6 +76,11 @@ export async function POST(req: NextRequest) {
       .from("reference_files")
       .select("anthropic_file_id, mime_type")
       .eq("enabled", true),
+    supabase
+      .from("skills")
+      .select("anthropic_skill_id, version")
+      .eq("enabled", true)
+      .limit(8),
   ]);
 
   const history = (priorMessages ?? []) as DbMessage[];
@@ -120,14 +126,25 @@ export async function POST(req: NextRequest) {
 
       let full = "";
 
+      const skillsList = (enabledSkills ?? [])
+        .filter((s): s is { anthropic_skill_id: string; version: string } => Boolean(s.anthropic_skill_id))
+        .map((s) => ({ skill_id: s.anthropic_skill_id, type: "custom" as const, version: s.version || "latest" }));
+
+      const streamParams: Parameters<typeof anthropic.beta.messages.stream>[0] = {
+        model,
+        max_tokens: 4096,
+        system: systemBlocks,
+        messages: apiMessages as unknown as Parameters<typeof anthropic.beta.messages.stream>[0]["messages"],
+        betas: ANTHROPIC_BETAS,
+      };
+
+      if (skillsList.length > 0) {
+        streamParams.container = { skills: skillsList };
+        streamParams.tools = [{ type: "code_execution_20250825", name: "code_execution" }];
+      }
+
       try {
-        const claudeStream = anthropic.beta.messages.stream({
-          model,
-          max_tokens: 4096,
-          system: systemBlocks,
-          messages: apiMessages as unknown as Parameters<typeof anthropic.beta.messages.stream>[0]["messages"],
-          betas: ANTHROPIC_BETAS,
-        });
+        const claudeStream = anthropic.beta.messages.stream(streamParams);
 
         for await (const event of claudeStream) {
           if (event.type === "content_block_delta" && event.delta.type === "text_delta") {
